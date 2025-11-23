@@ -1,4 +1,9 @@
+import sys
 from pathlib import Path
+
+# הוספת תקיית הפרויקט לשביל
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT))
 
 import pandas as pd
 
