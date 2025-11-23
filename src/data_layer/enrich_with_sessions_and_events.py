@@ -1,99 +1,84 @@
-"""Add session and event annotations to intraday data."""
-
 from __future__ import annotations
 
-from datetime import date, time
-from typing import Iterable, NamedTuple, Sequence
+import calendar
+from typing import Optional
 
 import pandas as pd
 
-SESSION_OPEN = time(hour=9, minute=30)
-SESSION_CLOSE = time(hour=16, minute=0)
-DEFAULT_SESSION_TZ = "America/New_York"
 
+def _get_session(hour_utc: int) -> str:
+    """
+    Simple session mapping based on UTC hour.
 
-class SessionWindow(NamedTuple):
-    """Simple definition of an intraday session window."""
-
-    label: str
-    start: time
-    end: time
-
-
-DEFAULT_SESSION_WINDOWS: Sequence[SessionWindow] = (
-    SessionWindow("Asia", time(hour=20, minute=0), time(hour=8, minute=0)),
-    SessionWindow("London", time(hour=3, minute=0), time(hour=11, minute=30)),
-    SessionWindow("NY", SESSION_OPEN, SESSION_CLOSE),
-)
-
-
-def _normalize_index_to_tz(index: pd.DatetimeIndex, tz: str) -> pd.DatetimeIndex:
-    if index.tz is None:
-        localized = index.tz_localize("UTC")
-    else:
-        localized = index
-    return localized.tz_convert(tz)
-
-
-def _label_sessions(local_times: pd.DatetimeIndex, windows: Sequence[SessionWindow]) -> pd.Series:
-    def label_for(ts: pd.Timestamp) -> str:
-        for window in windows:
-            if window.start <= window.end:
-                in_window = window.start <= ts.time() < window.end
-            else:
-                in_window = ts.time() >= window.start or ts.time() < window.end
-            if in_window:
-                return window.label
-        return "Off"
-
-    return pd.Series([label_for(ts) for ts in local_times], index=local_times)
-
-
-def _week_of_month(index: pd.DatetimeIndex) -> pd.Series:
-    return pd.Series(((index.day - 1) // 7) + 1, index=index)
+    This can be adjusted later to be more precise.
+    """
+    # Approximate sessions, adjustable later
+    if 0 <= hour_utc < 7:
+        return "Asia"
+    if 7 <= hour_utc < 13:
+        return "London"
+    if 13 <= hour_utc < 22:
+        return "NewYork"
+    return "AfterHours"
 
 
 def enrich_with_time_features(
     df: pd.DataFrame,
     *,
-    session_tz: str = DEFAULT_SESSION_TZ,
-    session_windows: Sequence[SessionWindow] = DEFAULT_SESSION_WINDOWS,
-    macro_event_dates: Iterable[date] | None = None,
+    tz: Optional[str] = "UTC",
 ) -> pd.DataFrame:
-    """Annotate OHLCV data with session labels and calendar context.
-
-    The function leaves the input columns untouched and appends:
-
-    - ``session``: Asia/London/NY labeling based on configurable local windows.
-    - ``session_type``: ``RTH`` for NY regular hours, ``ETH`` otherwise.
-    - ``day_of_week`` / ``weekday_name``
-    - ``week_of_month`` / ``month``
-    - ``is_macro_event_day``: ``True`` when the candle's calendar date matches a
-      provided macro event date (e.g., CPI/FOMC).
     """
+    Add time-based features to an OHLCV DataFrame.
 
-    if df.empty:
-        return df.copy()
+    Features:
+    - session: Asia/London/NewYork/AfterHours
+    - day_of_week: 0-6 (Mon=0)
+    - day_name: string name
+    - week_of_month: 1-5
+    - month: 1-12
+    - month_name: string name
 
-    localized_index = _normalize_index_to_tz(df.index, session_tz)
-    session_labels = _label_sessions(localized_index, session_windows)
-    rth_mask = (localized_index.time >= SESSION_OPEN) & (localized_index.time < SESSION_CLOSE)
+    Parameters
+    ----------
+    df:
+        DataFrame with DatetimeIndex.
+    tz:
+        Optional timezone to convert index for feature calculation.
+        Only affects derived features, not the underlying index.
 
-    annotated = df.copy()
-    annotated["session"] = session_labels.values
-    annotated["session_type"] = pd.Series(rth_mask, index=annotated.index).map({True: "RTH", False: "ETH"})
-    annotated["day_of_week"] = localized_index.weekday
-    annotated["weekday_name"] = localized_index.day_name()
-    annotated["week_of_month"] = _week_of_month(localized_index)
-    annotated["month"] = localized_index.month
+    Returns
+    -------
+    pd.DataFrame
+        Original columns + new feature columns.
+    """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("DataFrame index must be a DatetimeIndex")
 
-    if macro_event_dates:
-        macro_dates = {pd.Timestamp(d).date() for d in macro_event_dates}
-        date_index = pd.Index(localized_index.date)
-        annotated["is_macro_event_day"] = pd.Series(
-            date_index.isin(macro_dates), index=annotated.index
-        )
-    else:
-        annotated["is_macro_event_day"] = False
+    idx = df.index
+    if tz is not None:
+        # Work on a converted copy of the index for feature extraction
+        idx = idx.tz_convert(tz)
 
-    return annotated
+    # Basic date components
+    day_of_week = idx.dayofweek
+    day_name = idx.day_name()
+    month = idx.month
+    month_name = idx.month_name()
+
+    # Week of month: 1..5
+    # e.g. 1–7 -> 1, 8–14 -> 2, etc.
+    week_of_month = ((idx.day - 1) // 7) + 1
+
+    # Session by UTC hour (using original index)
+    hour_utc = df.index.tz_convert("UTC").hour
+    session = [ _get_session(h) for h in hour_utc ]
+
+    enriched = df.copy()
+    enriched["session"] = session
+    enriched["day_of_week"] = day_of_week
+    enriched["day_name"] = day_name
+    enriched["week_of_month"] = week_of_month
+    enriched["month"] = month
+    enriched["month_name"] = month_name
+
+    return enriched
