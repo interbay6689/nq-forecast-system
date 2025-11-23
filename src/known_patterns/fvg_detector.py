@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Literal, Optional
+from pathlib import Path
+from typing import List, Literal, Optional, Sequence
 
 import pandas as pd
+
+from src.data_layer.resample_timeframes import resample_ohlcv
 
 
 Direction = Literal["bull", "bear"]
@@ -174,3 +177,81 @@ def fvgs_to_frame(fvgs: List[FVG]) -> pd.DataFrame:
     df = pd.DataFrame.from_records(records)
     df = df.set_index("id").sort_index()
     return df
+
+
+# ===========================
+# Multi-timeframe utilities
+# ===========================
+
+
+def _normalize_tf_to_rule(tf: str) -> str:
+    """
+    Convert a human timeframe like '1m', '5m', '15m', '1H', '4H', '1D', '1W'
+    to a pandas resample rule.
+
+    We prefer 'min' instead of deprecated 'T'.
+    """
+    tf = tf.strip()
+    if tf.endswith("m"):
+        # '1m' -> '1min'
+        return tf[:-1] + "min"
+    return tf
+
+
+def detect_fvg_for_timeframes(
+    base_df: pd.DataFrame,
+    timeframes: Sequence[str],
+    *,
+    min_width: float = 0.0,
+) -> pd.DataFrame:
+    """
+    Detect FVGs for multiple timeframes from a base OHLCV DataFrame.
+
+    Parameters
+    ----------
+    base_df:
+        OHLCV DataFrame at a relatively low timeframe (e.g. 1m).
+    timeframes:
+        List of timeframe labels like ["1m", "5m", "15m", "1H"].
+    min_width:
+        Minimum width filter passed to `detect_fvg`.
+
+    Returns
+    -------
+    pd.DataFrame
+        Unified DataFrame of all detected FVGs across timeframes.
+    """
+    all_fvgs: list[FVG] = []
+
+    for tf in timeframes:
+        rule = _normalize_tf_to_rule(tf)
+
+        # Resample if needed
+        if rule != "1min":
+            df_tf = resample_ohlcv(base_df, rule)
+        else:
+            df_tf = base_df
+
+        fvgs_tf = detect_fvg(df_tf, tf=tf, min_width=min_width)
+        all_fvgs.extend(fvgs_tf)
+
+    return fvgs_to_frame(all_fvgs)
+
+
+def save_fvgs_to_parquet(df_fvgs: pd.DataFrame, path: str | Path) -> None:
+    """
+    Save FVG DataFrame to Parquet file.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df_fvgs.to_parquet(path)
+
+
+def load_fvgs_from_parquet(path: str | Path) -> pd.DataFrame:
+    """
+    Load FVG DataFrame from Parquet file.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"FVG file not found: {path}")
+    return pd.read_parquet(path)
