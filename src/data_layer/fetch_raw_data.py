@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal, Optional
 
+import nasdaqdatalink
 import pandas as pd
 
 
@@ -140,3 +142,100 @@ def load_and_resample(
         tf: resample_ohlcv(base_df, _normalize_timeframe(tf))
         for tf in timeframes
     }
+
+
+def get_nasdaq_api_key(env_var: str = "NASDAQ_API_KEY") -> str:
+    """
+    Read the Nasdaq Data Link API key from an environment variable.
+
+    Parameters
+    ----------
+    env_var:
+        Name of the environment variable holding the API key.
+
+    Returns
+    -------
+    str
+        API key string.
+
+    Raises
+    ------
+    RuntimeError
+        If the environment variable is not set.
+    """
+    key = os.getenv(env_var)
+    if not key:
+        raise RuntimeError(
+            f"Nasdaq API key not found. Please set environment variable '{env_var}'."
+        )
+    return key
+
+
+def fetch_nq_from_nasdaq(
+    dataset_code: str,
+    *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    tz: Optional[str] = "UTC",
+) -> pd.DataFrame:
+    """
+    Fetch NQ OHLCV data from Nasdaq Data Link.
+
+    Examples
+    --------
+    dataset_code could be something like:
+    - "CHRIS/CME_NQ1"   (continuous NQ future)
+    - Or another symbol supported by Nasdaq Data Link.
+
+    Parameters
+    ----------
+    dataset_code:
+        Nasdaq Data Link dataset code (e.g. "CHRIS/CME_NQ1").
+    start_date:
+        Optional start date (YYYY-MM-DD).
+    end_date:
+        Optional end date (YYYY-MM-DD).
+    tz:
+        Target timezone for the index.
+
+    Returns
+    -------
+    pd.DataFrame
+        DatetimeIndex, columns: ["open", "high", "low", "close", "volume"]
+    """
+    api_key = get_nasdaq_api_key()
+    nasdaqdatalink.ApiConfig.api_key = api_key
+
+    raw = nasdaqdatalink.get(
+        dataset_code,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    df = raw.rename(
+        columns={
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Last": "close",
+            "Settle": "close",
+            "Volume": "volume",
+        }
+    )
+
+    if "Date" in df.columns:
+        df.index = pd.to_datetime(df["Date"], utc=True)
+    else:
+        df.index = pd.to_datetime(df.index, utc=True)
+
+    if tz is not None:
+        df.index = df.index.tz_convert(tz)
+
+    required_cols = ["open", "high", "low", "close", "volume"]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise KeyError(f"Missing required OHLCV columns from Nasdaq data: {missing}")
+
+    df = df[required_cols].sort_index()
+
+    return df
